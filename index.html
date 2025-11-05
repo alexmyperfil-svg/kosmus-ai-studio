@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kosmus.AI Studio - Provador Virtual IA</title>
+    <!-- Carrega Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        :root {
+            --primary-color: #3b82f6; /* Blue-500 */
+            --primary-hover: #2563eb; /* Blue-600 */
+            --secondary-color: #10b981; /* Emerald-500 */
+            --bg-light: #f9fafb; /* Gray-50 */
+            --bg-dark: #1f2937; /* Gray-800 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-light);
+            transition: all 0.3s ease;
+        }
+        .drag-area {
+            border: 2px dashed var(--primary-color);
+            background-color: #ffffff;
+            transition: all 0.2s ease;
+        }
+        .drag-area.highlight {
+            background-color: #e0f2fe; /* Light Blue-100 */
+            border-color: var(--primary-hover);
+        }
+        .btn-primary {
+            background-color: var(--primary-color);
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .btn-primary:hover {
+            background-color: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+        .step-card {
+            background-color: #ffffff;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .skeleton {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+    <script>
+        // Configurações e estados do aplicativo
+        let modelImageBase64 = null;
+        let modelImageMimeType = '';
+        let clothingImageBase64 = null;
+        let clothingImageMimeType = '';
+        const MAX_RETRIES = 5;
+        const BASE_DELAY_MS = 1000;
+        const GENERATE_MODEL = 'gemini-2.5-flash-image-preview';
+
+        const apiKey = ""; // Chave da API
+
+        // Variáveis globais (fornecidas pelo ambiente Canvas)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- Funções de UI e Lógica ---
+
+        /**
+         * Converte um arquivo File ou Blob para Base64.
+         * @param {File} file - O arquivo a ser lido.
+         * @returns {Promise<{base64: string, mimeType: string}>}
+         */
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => {
+                    const base64 = reader.result.split(',')[1];
+                    resolve({ base64, mimeType: file.type });
+                };
+                reader.onerror = error => reject(error);
+            });
+        }
+
+        /**
+         * Lida com o upload e arrastar e soltar de arquivos.
+         * @param {Event} event - Evento de input ou drop.
+         * @param {'model' | 'clothing'} type - Tipo de imagem.
+         */
+        async function handleFileUpload(event, type) {
+            event.preventDefault();
+            const file = event.dataTransfer ? event.dataTransfer.files[0] : event.target.files[0];
+            if (!file || !file.type.startsWith('image/')) {
+                updateStatus('Erro: Por favor, selecione um arquivo de imagem válido.', 'error');
+                return;
+            }
+
+            try {
+                updateStatus('Carregando imagem...', 'loading');
+                const result = await fileToBase64(file);
+                const previewElement = document.getElementById(`${type}-preview`);
+
+                if (type === 'model') {
+                    modelImageBase64 = result.base64;
+                    modelImageMimeType = result.mimeType;
+                    document.getElementById('model-filename').textContent = file.name;
+                } else {
+                    clothingImageBase64 = result.base64;
+                    clothingImageMimeType = result.mimeType;
+                    document.getElementById('clothing-filename').textContent = file.name;
+                }
+                
+                previewElement.src = result.mimeType === 'image/svg+xml' ? `data:image/svg+xml;base64,${result.base64}` : `data:${result.mimeType};base64,${result.base64}`;
+                previewElement.classList.remove('hidden');
+                document.getElementById(`${type}-placeholder`).classList.add('hidden');
+                document.getElementById(`${type}-name-container`).classList.remove('hidden');
+                
+                updateStatus('Imagem carregada com sucesso.', 'success');
+                checkInputsForActivation();
+
+            } catch (error) {
+                updateStatus('Erro ao processar imagem. Tente novamente.', 'error');
+                console.error('File upload error:', error);
+            }
+        }
+
+        /**
+         * Adiciona classes de destaque visual.
+         * @param {Event} event
+         */
+        function highlightDrag(event) {
+            event.preventDefault();
+            event.currentTarget.classList.add('highlight');
+        }
+
+        /**
+         * Remove classes de destaque visual.
+         * @param {Event} event
+         */
+        function unhighlightDrag(event) {
+            event.preventDefault();
+            event.currentTarget.classList.remove('highlight');
+        }
+
+        /**
+         * Atualiza a área de status com mensagens.
+         * @param {string} message - Mensagem a ser exibida.
+         * @param {'info' | 'loading' | 'success' | 'error'} type - Tipo de status.
+         */
+        function updateStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status-message');
+            statusDiv.textContent = message;
+            statusDiv.className = 'p-3 rounded-xl transition duration-300 ease-in-out font-medium';
+            
+            if (type === 'loading') {
+                statusDiv.classList.add('bg-yellow-100', 'text-yellow-800');
+                document.getElementById('generate-btn').disabled = true;
+                document.getElementById('generate-btn-icon').classList.remove('hidden');
+            } else {
+                document.getElementById('generate-btn-icon').classList.add('hidden');
+                document.getElementById('generate-btn').disabled = false;
+                if (type === 'success') {
+                    statusDiv.classList.add('bg-green-100', 'text-green-800');
+                } else if (type === 'error') {
+                    statusDiv.classList.add('bg-red-100', 'text-red-800');
+                } else {
+                    statusDiv.classList.add('bg-gray-100', 'text-gray-700');
+                }
+            }
+        }
+
+        /**
+         * Verifica se as imagens essenciais foram carregadas para ativar o botão de geração.
+         */
+        function checkInputsForActivation() {
+            const btn = document.getElementById('generate-btn');
+            const requiredImagesLoaded = modelImageBase64 && clothingImageBase64;
+            btn.disabled = !requiredImagesLoaded;
+            if (requiredImagesLoaded) {
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                updateStatus('Pronto para gerar! Ajuste o estilo se desejar.', 'info');
+            } else {
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        /**
+         * Aplica uma sugestão de estilo predefinida.
+         */
+        function applySuggestion() {
+            const stylePrompt = document.getElementById('style-prompt');
+            const suggestions = [
+                "Luz de estúdio suave, fundo de passarela minimalista, pose dinâmica de modelo.",
+                "Cenário urbano chuvoso, iluminação de neon, pose casual e elegante.",
+                "Fundo de paisagem de verão ensolarado, pose relaxada e alegre.",
+                "Fotografia de moda vintage, cores sépia, fundo de biblioteca clássica."
+            ];
+            const currentText = stylePrompt.value.trim();
+            const newSuggestion = suggestions[Math.floor(Math.random() * suggestions.length)];
+            
+            stylePrompt.value = currentText ? `${currentText}. ${newSuggestion}` : newSuggestion;
+            updateStatus('Sugestão de estilo aplicada! Clique em gerar para ver o resultado.', 'success');
+        }
+
+        /**
+         * Lógica de chamada da API Gemini com Base64 e Backoff Exponencial.
+         * @param {number} retryCount - Contador de tentativas.
+         */
+        async function generateImage(retryCount = 0) {
+            if (!modelImageBase64 || !clothingImageBase64) {
+                updateStatus('Erro: Por favor, carregue a imagem da Modelo e da Roupa.', 'error');
+                return;
+            }
+
+            const stylePrompt = document.getElementById('style-prompt').value.trim();
+            const finalPrompt = `Crie uma imagem fotorrealista de prova virtual (virtual try-on). O objetivo é que a pessoa na PRIMEIRA imagem esteja vestindo a roupa da SEGUNDA imagem. Mantenha a pose, o corpo e o rosto da pessoa. A roupa deve ser renderizada de forma realista e contextualizada.
+                Detalhes de Estilo/Cenário: ${stylePrompt || 'Fotografia de estúdio de alta qualidade, iluminação suave, foco na roupa.'}`;
+
+            const payload = {
+                contents: [
+                    {
+                        role: "user",
+                        parts: [
+                            { text: finalPrompt },
+                            { inlineData: { mimeType: modelImageMimeType, data: modelImageBase64 } },
+                            { inlineData: { mimeType: clothingImageMimeType, data: clothingImageBase64 } }
+                        ]
+                    }
+                ],
+                generationConfig: {
+                    responseModalities: ['TEXT', 'IMAGE']
+                }
+            };
+
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GENERATE_MODEL}:generateContent?key=${apiKey}`;
+
+            // Preparação da UI
+            updateStatus('Gerando Prova Virtual... Isso pode levar alguns segundos.', 'loading');
+            document.getElementById('result-image').classList.add('skeleton', 'opacity-30');
+            document.getElementById('download-btn').classList.add('hidden');
+            document.getElementById('result-placeholder').classList.remove('hidden');
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    if (response.status === 429 && retryCount < MAX_RETRIES) {
+                        const delay = BASE_DELAY_MS * Math.pow(2, retryCount) + Math.random() * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        return generateImage(retryCount + 1); // Retry with backoff
+                    }
+                    throw new Error(`API returned status ${response.status}`);
+                }
+
+                const result = await response.json();
+                const part = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+                const base64Data = part?.inlineData?.data;
+
+                document.getElementById('result-image').classList.remove('skeleton', 'opacity-30');
+                document.getElementById('result-placeholder').classList.add('hidden');
+                document.getElementById('download-btn').classList.remove('hidden');
+
+                if (base64Data) {
+                    const imageUrl = `data:image/png;base64,${base64Data}`;
+                    const resultImage = document.getElementById('result-image');
+                    resultImage.src = imageUrl;
+                    resultImage.classList.remove('hidden');
+                    resultImage.onload = () => {
+                        updateStatus('Prova Virtual gerada com sucesso!', 'success');
+                    };
+                    document.getElementById('download-btn').onclick = () => downloadImage(imageUrl, 'prova_virtual_gemini.png');
+
+                } else {
+                    throw new Error('A resposta da API não continha dados de imagem.');
+                }
+
+            } catch (error) {
+                document.getElementById('result-image').classList.remove('skeleton', 'opacity-30');
+                updateStatus(`Erro na geração: ${error.message}. Verifique as imagens e tente novamente.`, 'error');
+                console.error('Generation API error:', error);
+            }
+        }
+
+        /**
+         * Lógica de download da imagem gerada.
+         * @param {string} dataUrl - URL da imagem Base64.
+         * @param {string} filename - Nome do arquivo.
+         */
+        function downloadImage(dataUrl, filename) {
+            const link = document.createElement('a');
+            link.href = dataUrl;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        /**
+         * Reseta toda a aplicação para o estado inicial.
+         */
+        function resetApp() {
+            modelImageBase64 = null;
+            clothingImageBase64 = null;
+            
+            // Limpar inputs de arquivo
+            const modelInput = document.getElementById('model-input');
+            const clothingInput = document.getElementById('clothing-input');
+            if (modelInput) modelInput.value = '';
+            if (clothingInput) clothingInput.value = '';
+
+            // Limpar pré-visualizações
+            ['model', 'clothing'].forEach(type => {
+                document.getElementById(`${type}-preview`).src = '';
+                document.getElementById(`${type}-preview`).classList.add('hidden');
+                document.getElementById(`${type}-placeholder`).classList.remove('hidden');
+                document.getElementById(`${type}-name-container`).classList.add('hidden');
+                document.getElementById(`${type}-filename`).textContent = '';
+            });
+
+            // Limpar resultado
+            document.getElementById('result-image').src = '';
+            document.getElementById('result-image').classList.add('hidden');
+            document.getElementById('result-placeholder').classList.remove('hidden');
+            document.getElementById('download-btn').classList.add('hidden');
+            
+            // Limpar estilo e status
+            document.getElementById('style-prompt').value = '';
+            checkInputsForActivation();
+            updateStatus('Aplicação reiniciada. Comece carregando as imagens.', 'info');
+        }
+
+        // --- Configuração de Event Listeners ---
+        window.onload = () => {
+            const dragAreas = document.querySelectorAll('.drag-area');
+            
+            // Adiciona listeners para drag and drop
+            dragAreas.forEach(area => {
+                area.addEventListener('dragover', highlightDrag);
+                area.addEventListener('dragleave', unhighlightDrag);
+                area.addEventListener('drop', (e) => {
+                    unhighlightDrag(e);
+                    const type = area.id.includes('model') ? 'model' : 'clothing';
+                    handleFileUpload(e, type);
+                });
+            });
+
+            // Adiciona listeners para o clique no botão
+            document.getElementById('generate-btn').addEventListener('click', () => generateImage());
+            document.getElementById('suggest-btn').addEventListener('click', applySuggestion);
+            document.getElementById('reset-btn').addEventListener('click', resetApp);
+            
+            // Inicializa o estado do botão
+            checkInputsForActivation();
+            updateStatus('Bem-vindo ao Provador Virtual. Carregue as imagens para começar.', 'info');
+        };
+
+        // Função vazia para simular o setup do Firebase (não é usado para esta funcionalidade de IA)
+        function setupFirebase() {
+             // Apenas um placeholder, o app de IA não usa Firestore/Auth ativamente
+        }
+    </script>
+</head>
+<body class="p-4 md:p-8">
+
+    <!-- Cabeçalho -->
+    <header class="text-center mb-8 md:mb-12">
+        <h1 class="text-5xl font-extrabold text-gray-900 tracking-tight mb-2">
+            <span class="text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-teal-500">
+                Kosmus.AI Studio
+            </span>
+        </h1>
+        <p class="text-gray-600 text-lg max-w-2xl mx-auto">
+            Crie provas virtuais fotorrealistas combinando modelos e roupas com a magia da Inteligência Artificial.
+        </p>
+    </header>
+
+    <main class="max-w-7xl mx-auto">
+        
+        <!-- Área Principal de Etapas -->
+        <section class="grid lg:grid-cols-5 gap-6 mb-10">
+
+            <!-- Coluna de Inputs (Etapas 1, 2, 3) -->
+            <div class="lg:col-span-3 space-y-6">
+
+                <!-- Etapas 1 e 2: Uploads -->
+                <div class="grid md:grid-cols-2 gap-6">
+
+                    <!-- Etapa 1: Upload Modelo -->
+                    <div class="step-card p-6 rounded-3xl">
+                        <h3 class="text-xl font-semibold mb-4 flex items-center text-gray-800">
+                            <span class="w-8 h-8 flex items-center justify-center bg-blue-500 text-white rounded-full mr-3">1</span>
+                            Imagem da Modelo (Pessoa)
+                        </h3>
+                        <div id="model-drag-area" class="drag-area p-6 text-center rounded-2xl cursor-pointer" onclick="document.getElementById('model-input').click()">
+                            <svg class="w-10 h-10 mx-auto text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
+                            <p class="text-gray-600 mt-2">Arraste & Solte ou Clique para Upload</p>
+                            <input type="file" id="model-input" accept="image/*" class="hidden" onchange="handleFileUpload(event, 'model')">
+                            
+                            <!-- Pré-visualização -->
+                            <div class="mt-4 relative h-32 w-full mx-auto bg-gray-100 rounded-xl overflow-hidden">
+                                <div id="model-placeholder" class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">Aguardando Imagem</div>
+                                <img id="model-preview" src="" alt="Pré-visualização da Modelo" class="hidden object-contain w-full h-full p-2">
+                            </div>
+
+                            <div id="model-name-container" class="mt-2 text-sm text-green-600 hidden">
+                                Arquivo: <span id="model-filename" class="font-medium truncate"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Etapa 2: Upload Roupa -->
+                    <div class="step-card p-6 rounded-3xl">
+                        <h3 class="text-xl font-semibold mb-4 flex items-center text-gray-800">
+                            <span class="w-8 h-8 flex items-center justify-center bg-blue-500 text-white rounded-full mr-3">2</span>
+                            Imagem da Roupa (Item)
+                        </h3>
+                        <div id="clothing-drag-area" class="drag-area p-6 text-center rounded-2xl cursor-pointer" onclick="document.getElementById('clothing-input').click()">
+                            <svg class="w-10 h-10 mx-auto text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10l-2 1m0 0l-2-1m2 1v6m-4-6h8m-8 0a2 2 0 100-4 2 2 0 000 4zm8 0a2 2 0 100-4 2 2 0 000 4z"></path></svg>
+                            <p class="text-gray-600 mt-2">Arraste & Solte ou Clique para Upload</p>
+                            <input type="file" id="clothing-input" accept="image/*" class="hidden" onchange="handleFileUpload(event, 'clothing')">
+                            
+                            <!-- Pré-visualização -->
+                            <div class="mt-4 relative h-32 w-full mx-auto bg-gray-100 rounded-xl overflow-hidden">
+                                <div id="clothing-placeholder" class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">Aguardando Imagem</div>
+                                <img id="clothing-preview" src="" alt="Pré-visualização da Roupa" class="hidden object-contain w-full h-full p-2">
+                            </div>
+
+                            <div id="clothing-name-container" class="mt-2 text-sm text-green-600 hidden">
+                                Arquivo: <span id="clothing-filename" class="font-medium truncate"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Etapa 3: Descrição de Estilo (Opcional) -->
+                <div class="step-card p-6 rounded-3xl">
+                    <h3 class="text-xl font-semibold mb-4 flex items-center text-gray-800">
+                        <span class="w-8 h-8 flex items-center justify-center bg-blue-500 text-white rounded-full mr-3">3</span>
+                        Detalhes de Estilo (Opcional)
+                    </h3>
+                    <textarea id="style-prompt" rows="3" placeholder="Ex: Iluminação de estúdio suave, fundo desfocado, pose de modelo profissional, cores vibrantes..."
+                        class="w-full p-3 border border-gray-300 rounded-xl focus:ring-blue-500 focus:border-blue-500 transition duration-150"></textarea>
+                    <button id="suggest-btn" class="w-full mt-3 bg-teal-500 text-white py-2 px-4 rounded-full font-semibold hover:bg-teal-600 transition duration-200 shadow-md">
+                        <span class="mr-2">💡</span> Sugestões Automáticas de Pose e Estilo
+                    </button>
+                </div>
+
+                <!-- Ações e Status -->
+                <div class="space-y-4">
+                    <!-- Botão Principal de Geração -->
+                    <button id="generate-btn" class="btn-primary w-full text-white py-4 px-6 rounded-3xl text-xl font-bold uppercase shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                        <span id="generate-btn-icon" class="hidden animate-spin mr-2">
+                            <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.34 19.34L4 19m16-15v5h.582M4.34 4.66L4 5m7.96 14.82l.42-.42m-1.74-2.73l.42-.42m-1.74-2.73l.42-.42"></path></svg>
+                        </span>
+                        Gerar Prova Virtual
+                    </button>
+                    
+                    <!-- Status -->
+                    <div id="status-message" class="text-center p-3 rounded-xl bg-gray-100 text-gray-700 font-medium">
+                        Aguardando inputs...
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- Coluna de Resultado -->
+            <div class="lg:col-span-2 space-y-6">
+                <div class="step-card p-6 rounded-3xl">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Área de Resultado Final</h2>
+                    
+                    <!-- Área de Visualização da Imagem -->
+                    <div class="relative w-full aspect-[3/4] bg-gray-100 rounded-xl overflow-hidden shadow-inner flex items-center justify-center">
+                        <div id="result-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 text-lg p-4 text-center">
+                            <svg class="w-12 h-12 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-2-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                            O resultado fotorrealista aparecerá aqui.
+                        </div>
+                        <img id="result-image" src="" alt="Resultado da Prova Virtual" class="hidden object-contain w-full h-full">
+                    </div>
+
+                    <!-- Opções de Ação no Resultado -->
+                    <div class="flex space-x-4 mt-4">
+                        <button id="download-btn" class="hidden flex-1 flex items-center justify-center bg-teal-500 text-white py-3 px-4 rounded-full font-semibold hover:bg-teal-600 transition duration-200 shadow-md">
+                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                            Download Imagem
+                        </button>
+                        <button id="reset-btn" class="flex-1 flex items-center justify-center bg-red-500 text-white py-3 px-4 rounded-full font-semibold hover:bg-red-600 transition duration-200 shadow-md">
+                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.34 19.34L4 19m7 1.5c-3.738 0-6.864-2.528-7.792-6M20 18v.01"></path></svg>
+                            Resetar
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+    </main>
+
+</body>
+</html>
